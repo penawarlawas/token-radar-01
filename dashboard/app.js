@@ -12,9 +12,11 @@
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
-    if (Math.abs(n) >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-    if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
+    var abs = Math.abs(n);
+    if (abs >= 1e12) return '$' + (n / 1e12).toFixed(3).replace(/\.?0+$/, '') + 'T';
+    if (abs >= 1e9) return '$' + (n / 1e9).toFixed(3).replace(/\.?0+$/, '') + 'B';
+    if (abs >= 1e6) return '$' + (n / 1e6).toFixed(3).replace(/\.?0+$/, '') + 'M';
+    if (abs >= 1e3) return '$' + (n / 1e3).toFixed(3).replace(/\.?0+$/, '') + 'K';
     return usd.format(n);
   }
   function fmtPct(n) {
@@ -295,6 +297,8 @@
 
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
+  // Inline detail panel for headless / non-interactive contexts
+  var inlineDetail = el('section', { class: 'detail-inline', id: 'detail-inline', 'aria-hidden': 'true' });
 
   function openDetail(slug) {
     var row = DATA.rows.filter(function (r) { return r.slug === slug; })[0];
@@ -332,6 +336,38 @@
         return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
       }))
     ));
+    // Render inline fallback (always present, hidden when dialog open in interactive)
+    inlineDetail.textContent = '';
+    inlineDetail.appendChild(el('div', { class: 'detail-head' },
+      el('div', null,
+        el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size }),
+        el('h2', { text: row.name }),
+        el('p', { class: 'sub', text: (row.category || 'Other') + ' on ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') })
+      ),
+      el('button', { class: 'close', type: 'button', 'aria-label': 'Close inline detail', text: 'Close', onclick: function () { state.selected = null; writeHash(); render(); } })
+    ));
+    inlineDetail.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Implied value' }),
+      el('div', { class: 'equation' },
+        el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
+        el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
+        el('div', null, el('span', { text: 'Days since tracking began' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
+        el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
+        el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
+        el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
+      ),
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. This is an estimate, not a price.' })
+    ));
+    inlineDetail.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Farm plan' }),
+      el('ol', { class: 'steps' }, steps.map(function (s) {
+        var at = s.indexOf(' Cost: ');
+        var action = at >= 0 ? s.slice(0, at) : s;
+        var tail = at >= 0 ? s.slice(at + 1) : '';
+        return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
+      }))
+    ));
+    inlineDetail.setAttribute('aria-hidden', 'false');
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
     } else {
@@ -341,6 +377,9 @@
 
   function render() {
     app.textContent = '';
+    document.body.classList.remove('state-filtered', 'state-detail');
+    if (state.tab === 'pre-token' && state.category !== 'all') document.body.classList.add('state-filtered');
+    if (state.selected) document.body.classList.add('state-detail');
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
@@ -350,7 +389,9 @@
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
+    if (!inlineDetail.isConnected) app.appendChild(inlineDetail);
     if (state.selected) openDetail(state.selected);
+    else inlineDetail.setAttribute('aria-hidden', 'true');
   }
 
   readHash();
