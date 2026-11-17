@@ -51,7 +51,8 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+// Keep the ranked contract compact; data.js retains the dashboard's richer fields.
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board.map(({ rank, slug, name, implied_value_usd, farm_steps }) => ({ rank, slug, name, implied_value_usd, farm_steps })) })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */

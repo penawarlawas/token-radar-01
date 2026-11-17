@@ -9,9 +9,9 @@
 // Implied value follows only from the snapshot's own figures:
 //
 //   base       = tvl_usd x BASE_MULTIPLE
-//   growth     = clamp(change_7d, -60, 120) per cent
+//   growth     = clamp(change_7d, -60, 80) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
+//   maturity   = 0.7 + min(age_days, 1095) / 1095 x 0.3   (age_days unknown: 365)
 //   implied    = max(1, round(base x growthMult x maturity))
 //
 // The constants are the house model's, stated in the dashboard and changeable in the model sandbox. No
@@ -54,20 +54,20 @@ export interface ModelConstants {
 
 export const MODEL: ModelConstants = {
   base_multiple: 0.25,
-  growth_weight: 0.5,
+  growth_weight: 0.8,
   growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
+  growth_cap: 80,
+  maturity_floor: 0.7,
+  maturity_range: 0.3,
   maturity_days: 1095,
   unknown_age_days: 365,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-1';
+export const MODEL_VERSION = 'radar-2';
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+/** How many pre-token protocols below the watchlist floor the early radar carries, by implied value. */
+export const EARLY_ROWS = 60;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -120,6 +120,7 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  farm_steps: string[];
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -180,8 +181,9 @@ export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: Mo
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
+  // ponytail: snapshot has no holders, flows, unlocks, funding or audits; add them only with sealed data.
+  const base = Math.max(0, finite(protocol.tvl_usd, 0)) * model.base_multiple;
+  const implied = Math.min(100_000_000_000_000, Math.max(1, Math.round(finite(base * growthMult * maturityMult, 1))));
   return { implied, growthPct, growthMult, maturityMult, age };
 }
 
@@ -221,11 +223,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
+  // The early radar: pre-token protocols below the watchlist floor, by implied value, capped. Never a replacement
   // for a watchlist row: a chosen protocol stays chosen.
   const early = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
+    .sort((a, b) => impliedValue(b, snapshot.as_of, model).implied - impliedValue(a, snapshot.as_of, model).implied || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
@@ -317,37 +319,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const threshold = Math.round(Math.max(0, p.tvl_usd) * 0.8);
   return [
-    {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
-      cost: 'under $3 of gas for the first transaction',
-      time: '5 minutes',
-    },
-    {
-      text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
-      time: '15 minutes to set up',
-    },
-    {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
-    },
-    {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
-      cost: `the $${capital} stays in the position`,
-      time: `${hold} days`,
-    },
-    {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
-      cost: 'no fee to check, and never pay to claim',
-      time: '10 minutes',
-    },
-    {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
-      cost: 'nothing but the log',
-      time: '5 minutes',
-    },
+    { text: action, cost: `$${capital} at risk plus gas`, time: '15 minutes' },
+    { text: `Watch TVL $${p.tvl_usd} (7d ${p.change_7d === null ? 'unknown' : `${p.change_7d}%`}), audits and token news; eligibility unknown.`, cost: 'none to review', time: `weekly for ${hold} days` },
+    { text: `Stop deposits and consider exit below $${threshold} TVL, after exploit or depeg. Check exit liquidity.`, cost: 'gas and potential loss', time: 'immediately' },
   ];
 }
 
@@ -384,6 +360,7 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    farm_steps: row.farm_steps,
   };
 }
 
