@@ -14,9 +14,9 @@
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, parseSnapshot, SnapshotError } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -26,12 +26,29 @@ const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
-/** --name <value> out of the arguments, or the fallback. */
+/** A finite number, else `fallback`. */
 function arg(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
-  if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
+  if (at >= 0) {
+    if (at + 1 >= process.argv.length) {
+      process.stderr.write(`token radar: --${name} requires a value\\n`);
+      process.exit(2);
+    }
+    const next = process.argv[at + 1]!;
+    if (next.startsWith('--')) {
+      process.stderr.write(`token radar: --${name} requires a value\\n`);
+      process.exit(2);
+    }
+    return next;
+  }
   const withEquals = process.argv.find((a) => a.startsWith(`--${name}=`));
-  return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
+  if (withEquals === undefined) return fallback;
+  const value = withEquals.slice(name.length + 3);
+  if (value === '') {
+    process.stderr.write(`token radar: --${name} requires a value\\n`);
+    process.exit(2);
+  }
+  return value;
 }
 
 const inputArg = arg('input', '/input');
@@ -41,8 +58,26 @@ if (!existsSync(inputFile)) {
   process.exit(2);
 }
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+// Refuse to write into the source root or the snapshot's own directory: copyFiles would then copy
+// dashboard/ and screenshots/ onto themselves. A subdirectory such as out/ is allowed (see README).
+const outRoot = resolve(out);
+for (const [label, root] of [['source', resolve(here)], ['input', resolve(dirname(inputFile))]] as const) {
+  if (outRoot === root) {
+    process.stderr.write(`token radar: --output ${out} would overwrite the ${label} tree ${root}\\n`);
+    process.exit(2);
+  }
+}
 
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+let snapshot: ReturnType<typeof parseSnapshot>;
+try {
+  snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+} catch (err) {
+  if (err instanceof SnapshotError) {
+    process.stderr.write(`token radar: ${err.message}\\n`);
+    process.exit(2);
+  }
+  throw err;
+}
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {

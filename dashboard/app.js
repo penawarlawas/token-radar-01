@@ -8,6 +8,9 @@
   if (!DATA) return;
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  // The search box is rebuilt on every render; carry its caret across the debounced re-render.
+  var pendingCaret = null;
+  var renderTimer = null;
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -179,7 +182,21 @@
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
     var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
-    search.addEventListener('input', function () { var pos = search.selectionStart; state.q = search.value; writeHash(); render(); var next = document.getElementById('q'); next.focus(); next.setSelectionRange(pos, pos); });
+    search.addEventListener('input', function () {
+      state.q = search.value;
+      writeHash();
+      pendingCaret = search.selectionStart;
+      scheduleRender();
+    });
+    search.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && state.q) {
+        e.preventDefault();
+        state.q = '';
+        search.value = '';
+        writeHash();
+        render();
+      }
+    });
     var select = el('select', { id: 'category', 'aria-label': 'Filter by category' },
       el('option', { value: 'all', text: 'All categories' }),
       categories.map(function (c) { return el('option', { value: c, text: c, selected: c === state.category ? 'selected' : null }); })
@@ -191,15 +208,29 @@
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('span', { class: 'count', 'aria-live': 'polite', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
   }
 
+  // Debounced render: the search input fires on every keystroke; we delay the heavy DOM rebuild.
+  function scheduleRender() {
+    if (renderTimer !== null) clearTimeout(renderTimer);
+    renderTimer = setTimeout(function () { renderTimer = null; render(); }, 120);
+  }
+
+  // The sort arrow is always in the header, so the label never shifts when the order flips.
   function sortHeader(key, label) {
-    return el('th', { scope: 'col' },
-      el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
+    var active = state.sort === key;
+    var dir = state.dir < 0 ? 'descending' : 'ascending';
+    return el('th', { scope: 'col', 'aria-sort': active ? dir : 'none' },
+      el('button', {
+        type: 'button',
+        class: active ? 'sorted' : null,
+        'aria-label': label + (active ? ', sorted ' + dir + ', activate to reverse' : ', activate to sort'),
+        onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); }
+      },
         label,
-        state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
+        el('span', { class: 'sort-ind', 'aria-hidden': 'true', text: active ? (state.dir < 0 ? '\u25BC' : '\u25B2') : '' })
       )
     );
   }
@@ -221,8 +252,22 @@
       var tr = el('tr', {
         'data-selected': state.selected === r.slug ? 'true' : 'false',
         tabindex: '0',
+        'aria-label': r.name + ', rank ' + r.rank + ', TVL ' + fmtUsd(r.tvl_usd) + ', ' + (r.change_7d === null ? 'no 7d data' : (r.change_7d >= 0 ? '+' : '') + fmtPct(r.change_7d) + ' 7d'),
         onclick: function () { openDetail(r.slug); },
-        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
+        onkeydown: function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); return; }
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') {
+            e.preventDefault();
+            var rowsArr = Array.from(tbody.querySelectorAll('tr'));
+            var i = rowsArr.indexOf(tr);
+            var target = i;
+            if (e.key === 'ArrowDown') target = Math.min(i + 1, rowsArr.length - 1);
+            else if (e.key === 'ArrowUp') target = Math.max(i - 1, 0);
+            else if (e.key === 'Home') target = 0;
+            else if (e.key === 'End') target = rowsArr.length - 1;
+            if (target !== i) rowsArr[target].focus();
+          }
+        }
       },
         el('td', { class: 'num', text: String(r.rank) }),
         el('td', null, el('div', { class: 'name' },
@@ -376,6 +421,7 @@
   }
 
   function render() {
+    if (renderTimer !== null) { clearTimeout(renderTimer); renderTimer = null; }
     app.textContent = '';
     document.body.classList.remove('state-filtered', 'state-detail');
     if (state.tab === 'pre-token' && state.category !== 'all') document.body.classList.add('state-filtered');
@@ -392,6 +438,12 @@
     if (!inlineDetail.isConnected) app.appendChild(inlineDetail);
     if (state.selected) openDetail(state.selected);
     else inlineDetail.setAttribute('aria-hidden', 'true');
+    // Restore search focus and caret after debounced re-render.
+    if (pendingCaret !== null) {
+      var q = document.getElementById('q');
+      if (q) { q.focus(); try { q.setSelectionRange(pendingCaret, pendingCaret); } catch (_) {} }
+      pendingCaret = null;
+    }
   }
 
   readHash();

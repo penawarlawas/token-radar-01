@@ -164,13 +164,36 @@ function finite(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * A strict UTC calendar day. Accepts YYYY-MM-DD and the date part of an ISO timestamp; rejects rolls
+ * (2026-02-30), short months and anything Date.parse would silently normalize.
+ */
+export function parseDay(value: unknown): { ms: number; day: string } | null {
+  if (typeof value !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec(value);
+  if (m === null) return null;
+  const day = `${m[1]}-${m[2]}-${m[3]}`;
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 10) !== day) return null;
+  return { ms, day };
+}
+
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
-  if (listedAt === null) return null;
-  const a = Date.parse(`${asOf}T00:00:00Z`);
-  const b = Date.parse(`${listedAt}T00:00:00Z`);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.floor((a - b) / DAY_MS));
+  const a = parseDay(asOf);
+  const b = parseDay(listedAt);
+  if (a === null || b === null) return null;
+  return Math.max(0, Math.floor((a.ms - b.ms) / DAY_MS));
+}
+
+/** One record per slug, first occurrence wins: a duplicated input row cannot be ranked twice. */
+export function deduplicateProtocols(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  const seen = new Set<string>();
+  return protocols.filter((p) => {
+    if (seen.has(p.slug)) return false;
+    seen.add(p.slug);
+    return true;
+  });
 }
 
 /** The three multipliers and the implied value one protocol gets under `model`. */
@@ -215,7 +238,8 @@ export interface BoardSummary {
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const index = bySlug(snapshot.protocols);
+  const protocols = deduplicateProtocols(snapshot.protocols);
+  const index = bySlug(protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
   // board's coverage is the gate's row and is never gambled on a missing record).
@@ -225,7 +249,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
   // The early radar: pre-token protocols below the watchlist floor, by implied value, capped. Never a replacement
   // for a watchlist row: a chosen protocol stays chosen.
-  const early = snapshot.protocols
+  const early = protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
     .sort((a, b) => impliedValue(b, snapshot.as_of, model).implied - impliedValue(a, snapshot.as_of, model).implied || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
     .slice(0, EARLY_ROWS);
@@ -329,7 +353,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
 
 /** The live-token protocols, by market cap, for the dashboard's Live token view. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
-  return snapshot.protocols
+  const protocols = deduplicateProtocols(snapshot.protocols);
+  return protocols
     .filter((p) => !isPreToken(p) && p.category !== 'CEX')
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
     .slice(0, LIVE_ROWS)
@@ -395,17 +420,25 @@ export function parseSnapshot(text: string): Snapshot {
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new SnapshotError('snapshot.json is not a JSON object');
   const o = raw as Record<string, unknown>;
-  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of)) throw new SnapshotError('snapshot.json has no as_of date');
+  if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of) || !Number.isFinite(Date.parse(`${o.as_of}T00:00:00Z`)) || new Date(`${o.as_of}T00:00:00Z`).toISOString().slice(0, 10) !== o.as_of) throw new SnapshotError('snapshot.json has no valid as_of date');
   if (typeof o.source !== 'string') throw new SnapshotError('snapshot.json has no source');
   if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0) throw new SnapshotError('snapshot.json has no floor_usd');
   if (!Array.isArray(o.protocols)) throw new SnapshotError('snapshot.json has no protocols array');
   if (!Array.isArray(o.watchlist) || o.watchlist.some((s) => typeof s !== 'string')) throw new SnapshotError('snapshot.json has no watchlist of slugs');
+  const seenWatch = new Set<string>();
+  for (const s of o.watchlist) {
+    if (seenWatch.has(s)) throw new SnapshotError(`snapshot.json has duplicate watchlist slug ${s}`);
+    seenWatch.add(s);
+  }
+  const seenSlugs = new Set<string>();
   const protocols = o.protocols.map((v, i) => {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new SnapshotError(`snapshot.json's protocol ${i} is not an object`);
     const p = v as Record<string, unknown>;
-    if (typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd)) {
-      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a TVL`);
+    if (typeof p.slug !== 'string' || !p.slug.trim() || typeof p.name !== 'string' || !p.name.trim() || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd) || p.tvl_usd < 0) {
+      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a valid slug, name or non-negative TVL`);
     }
+    if (seenSlugs.has(p.slug)) throw new SnapshotError(`snapshot.json has duplicate protocol slug ${p.slug}`);
+    seenSlugs.add(p.slug);
     return {
       slug: p.slug,
       name: p.name,
@@ -414,7 +447,7 @@ export function parseSnapshot(text: string): Snapshot {
       tvl_usd: p.tvl_usd,
       change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
       mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
-      listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
+      listed_at: typeof p.listed_at === 'string' && parseDay(p.listed_at) !== null ? p.listed_at : null,
       gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
       symbol: typeof p.symbol === 'string' ? p.symbol : null,
     };

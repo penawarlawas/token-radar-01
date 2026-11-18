@@ -1,12 +1,20 @@
 # Strategy
 
-The sealed snapshot has 758 protocols and 40 watchlist entries. All 40 are included; 60 additional eligible records below the floor are selected by implied value. Recorded tokens are displayed separately, not ranked with candidates. A missing token record is not proof that no token exists. Versioned pools and CEXes are excluded from early candidates; parent relationships are not available.
+The sealed snapshot has 758 protocols and 40 watchlist entries. All 40 watchlist entries are included; up to 60 additional eligible records below the floor are selected by implied value. Recorded tokens are displayed separately, not ranked with candidates. A missing token record is not proof that no token exists. Versioned pools and CEXes are excluded from early candidates; parent relationships are not available.
 
 ## Signal and weights
 
 Implied value = round(TVL × 0.25 × growth multiplier × maturity multiplier), bounded to $1–$100 trillion. Growth multiplier = 1 + 0.8 × clamp(7-day TVL change, -60%, +80%); missing change is neutral. Maturity multiplier = 0.7 + 0.3 × min(days since tracking began, 1,095) / 1,095; unknown age uses 365 days. These heuristic weights favor current capital and positive trajectory while capping short-term spikes, and discount young records without treating missing age as zero. Tracking age is not protocol age or time since funding. Value is neither a market price nor a prediction.
 
 Liquidity per holder, buy/sell pressure, holder concentration, 30-day unlocks, funding and audits are not present in the snapshot. They are unknown, not zero; do not invent them. A single 7-day observation cannot establish a multi-period trend.
+
+## Input validation and data hygiene
+
+The snapshot parser rejects malformed input before it reaches the model: duplicate watchlist slugs, duplicate
+protocol slugs, empty protocol names, negative TVL, and dates that are not real calendar dates (e.g. 2026-02-30)
+all raise a `SnapshotError` with a specific message. Teams submitting a competition snapshot are expected to fix
+the source data, not rely on the parser to repair it. Within the model, protocols are deduplicated by slug before
+ranking or live-token listing so a repeated record cannot occupy two board slots; the first occurrence is kept.
 
 ## Farm plan and invalidation
 
